@@ -198,7 +198,7 @@ def make_detmot_transforms(image_set, args=None):
     if image_set == 'train':
         color_transforms = []
         scale_transforms = [
-            T.MotRandomHorizontalFlip(),
+            T.MultiviewMotRandomHorizontalFlip(),
             T.MotRandomResize(scales, max_size=1333),
             normalize,
         ]

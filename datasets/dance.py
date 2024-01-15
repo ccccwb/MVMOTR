@@ -37,15 +37,18 @@ class DetMOTDetection:
         self.sample_mode = args.sample_mode
         self.sample_interval = args.sample_interval
         self.video_dict = {}
-        self.split_dir = os.path.join(args.mot_path, "train", "1")
+        self.split_dir = os.path.join(data_txt_path, "1")
+        self.split_dir_2 = os.path.join(data_txt_path, "2")
 
         self.labels_full = defaultdict(lambda : defaultdict(list))
+        self.labels_full_2 = defaultdict(lambda : defaultdict(list))
+        
         for vid in os.listdir(self.split_dir):
             if 'DPM' in vid or 'FRCNN' in vid:
                 print(f'filter {vid}')
                 continue
 
-            # 读取XML文件
+            # 读取视角1 XML文件
             gt_path = os.path.join(args.mot_path, "new_xml", '1', vid+'.xml')
             tree = ET.parse(gt_path)
             root = tree.getroot()
@@ -69,6 +72,35 @@ class DetMOTDetection:
                     w = xbr - xtl
                     h = ybr - ytl
                     self.labels_full[vid][frame].append([x, y, w, h, track_id, False])
+        for vid in os.listdir(self.split_dir_2):
+            if 'DPM' in vid or 'FRCNN' in vid:
+                print(f'filter {vid}')
+                continue            
+            # # 读取视角2 XML文件
+            gt_path = os.path.join(args.mot_path, "new_xml", '2', vid+'.xml')
+            tree = ET.parse(gt_path)
+            root = tree.getroot()
+
+            # 遍历每个<box>元素
+            for track in root.findall('.//track'):
+                track_id = int(track.get('id'))
+                label = track.get('label')
+                
+                # 遍历每个<box>元素
+                for box in track.findall('.//box'):
+                    frame = int(box.get('frame'))
+                    occluded = int(box.get('occluded'))
+                    outside = int(box.get('outside'))
+                    xbr = float(box.get('xbr'))
+                    xtl = float(box.get('xtl'))
+                    ybr = float(box.get('ybr'))
+                    ytl = float(box.get('ytl'))
+                    x = xtl
+                    y = ytl
+                    w = xbr - xtl
+                    h = ybr - ytl
+                    self.labels_full_2[vid][frame].append([x, y, w, h, track_id, False])
+                    
         vid_files = list(self.labels_full.keys())
 
         self.indices = []
@@ -80,6 +112,18 @@ class DetMOTDetection:
             self.vid_tmax[vid] = t_max - 1
             for t in range(t_min, t_max - self.num_frames_per_batch):
                 self.indices.append((vid, t))
+                
+        self.indices_2 = []
+        self.vid_tmax_2 = {}
+        vid_files = list(self.labels_full_2.keys())
+        for vid in vid_files:
+            # self.video_dict[vid] = len(self.video_dict)
+            t_min = min(self.labels_full_2[vid].keys())
+            t_max = max(self.labels_full_2[vid].keys()) + 1
+            self.vid_tmax_2[vid] = t_max - 1
+            for t in range(t_min, t_max - self.num_frames_per_batch):
+                self.indices_2.append((vid, t))
+
 
         self.sampler_steps: list = args.sampler_steps
         self.lengths: list = args.sampler_lengths
@@ -111,7 +155,15 @@ class DetMOTDetection:
         gt_instances.obj_ids = targets['obj_ids']
         gt_instances.area = targets['area']
         return gt_instances
-
+    @staticmethod
+    def _targets_to_instances_2(targets: dict, img_shape) -> Instances:
+        gt_instances = Instances(tuple(img_shape))
+        gt_instances.boxes = targets['boxes_2']
+        # gt_instances.labels = targets['labels']
+        gt_instances.obj_ids = targets['obj_ids_2']
+        gt_instances.area = targets['area_2']
+        return gt_instances
+    
     def load_crowd(self):
         path, boxes, crowd = choice(self.crowd_gts)
         img = Image.open(path)
@@ -134,8 +186,14 @@ class DetMOTDetection:
         return [img], [target]
 
     def _pre_single_frame(self, vid, idx: int):
+        
         img_path = os.path.join(self.split_dir, vid, f'{idx:08d}.jpg')
         img = Image.open(img_path)
+        
+        vid_2 = vid.replace('-1','-2')
+        img_path_2 = os.path.join(self.split_dir_2, vid_2, f'{idx:08d}.jpg')
+        img_2 = Image.open(img_path_2)
+        
         targets = {}
         w, h = img._size
         assert w > 0 and h > 0, "invalid image {} with shape {} {}".format(img_path, w, h)
@@ -150,12 +208,24 @@ class DetMOTDetection:
         targets['image_id'] = torch.as_tensor(idx)
         targets['size'] = torch.as_tensor([h, w])
         targets['orig_size'] = torch.as_tensor([h, w])
+        
+        
         for *xywh, id, crowd in self.labels_full[vid][idx]:
             targets['boxes'].append(xywh)
             targets['area'].append(xywh[2] * xywh[3])
             targets['iscrowd'].append(crowd)
             targets['labels'].append(0)
             targets['obj_ids'].append(id + obj_idx_offset)
+        
+        targets['boxes_2'] = []
+        targets['area_2'] = []
+        targets['iscrowd_2'] = []
+        targets['obj_ids_2'] = []    
+        for *xywh, id, crowd in self.labels_full_2[vid_2][idx]:
+            targets['boxes_2'].append(xywh)
+            targets['area_2'].append(xywh[2] * xywh[3])
+            targets['iscrowd_2'].append(crowd)
+            targets['obj_ids_2'].append(id + obj_idx_offset)
 
         targets['area'] = torch.as_tensor(targets['area'])
         targets['iscrowd'] = torch.as_tensor(targets['iscrowd'])
@@ -163,7 +233,14 @@ class DetMOTDetection:
         targets['obj_ids'] = torch.as_tensor(targets['obj_ids'], dtype=torch.float64)
         targets['boxes'] = torch.as_tensor(targets['boxes'], dtype=torch.float32).reshape(-1, 4)
         targets['boxes'][:, 2:] += targets['boxes'][:, :2]
-        return img, targets
+        
+        targets['area_2'] = torch.as_tensor(targets['area_2'])
+        targets['iscrowd_2'] = torch.as_tensor(targets['iscrowd_2'])
+        targets['obj_ids_2'] = torch.as_tensor(targets['obj_ids_2'], dtype=torch.float64)
+        targets['boxes_2'] = torch.as_tensor(targets['boxes_2'], dtype=torch.float32).reshape(-1, 4)
+        targets['boxes_2'][:, 2:] += targets['boxes_2'][:, :2]
+        
+        return img, img_2, targets
 
     def _get_sample_range(self, start_idx):
 
@@ -189,18 +266,27 @@ class DetMOTDetection:
     def __getitem__(self, idx):
         vid, f_index = self.indices[idx]
         indices = self.sample_indices(vid, f_index)
-        images, targets = self.pre_continuous_frames(vid, indices)
+        images, images_2, targets = self.pre_continuous_frames(vid, indices)
+        images_two_view = [images, images_2]
         dataset_name = targets[0]['dataset']
+        
         transform = self.dataset2transform[dataset_name]
         if transform is not None:
-            images, targets = transform(images, targets)
+            images_two_view, targets = transform(images_two_view, targets)
+            images, images_2 = images_two_view
         gt_instances = []
+        gt_instances_2 = []
         for img_i, targets_i in zip(images, targets):
             gt_instances_i = self._targets_to_instances(targets_i, img_i.shape[1:3])
             gt_instances.append(gt_instances_i)
+            
+            gt_instances_i = self._targets_to_instances_2(targets_i, img_i.shape[1:3])
+            gt_instances_2.append(gt_instances_i)
         return {
             'imgs': images,
+            'imgs_2': images_2,
             'gt_instances': gt_instances,
+            'gt_instances_2': gt_instances_2,
         }
 
     def __len__(self):
@@ -216,20 +302,20 @@ class DetMOTDetectionValidation(DetMOTDetection):
 def make_transforms_for_mot17(image_set, args=None):
 
     normalize = T.MotCompose([
-        T.MotToTensor(),
-        T.MotNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        T.MultiviewMotToTensor(),
+        T.MultiviewMotNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     scales = [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992]
 
     if image_set == 'train':
         return T.MotCompose([
-            T.MotRandomHorizontalFlip(),
+            T.MultiviewMotRandomHorizontalFlip(),
             T.MotRandomSelect(
-                T.MotRandomResize(scales, max_size=1536),
+                T.MultiviewMotRandomResize(scales, max_size=1536),
                 T.MotCompose([
-                    T.MotRandomResize([800, 1000, 1200]),
-                    T.FixedMotRandomCrop(800, 1200),
-                    T.MotRandomResize(scales, max_size=1536),
+                    T.MultiviewMotRandomResize([800, 1000, 1200]),
+                    T.MultiviewFixedMotRandomCrop(800, 1200),
+                    T.MultiviewMotRandomResize(scales, max_size=1536),
                 ])
             ),
             normalize,
@@ -237,7 +323,7 @@ def make_transforms_for_mot17(image_set, args=None):
 
     if image_set == 'val':
         return T.MotCompose([
-            T.MotRandomResize([800], max_size=1333),
+            T.MultiviewMotRandomResize([800], max_size=1333),
             normalize,
         ])
 
